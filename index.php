@@ -1,76 +1,74 @@
 <?php
 include 'db.php';
+include 'Task.php';
 
-// Add a new task
+$taskManager = new Task($pdo);
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['task'])) {
-    // Input validation
+    // Adding a new task
     $task = trim($_POST['task']);
     if (empty($task) || strlen($task) > 255) {
         echo "Task cannot be empty and must be less than 255 characters.";
         exit;
     }
 
-    // Prepare and insert task
-    $stmt = $pdo->prepare("INSERT INTO tasks (task, status) VALUES (:task, 'pending')");
-    $stmt->execute(['task' => $task]);
+    $taskManager->addTask($task);
     header("Location: index.php");
     exit;
 }
 
-// Update task status based on AJAX request
-if (isset($_POST['task_id']) && isset($_POST['status'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_task_id']) && isset($_POST['new_content'])) {
+    // Updating an existing task content
+    $taskId = filter_var($_POST['update_task_id'], FILTER_VALIDATE_INT);
+    $newContent = trim($_POST['new_content']);
+
+    if ($taskId === false) {
+        echo "Invalid task ID.";
+        exit;
+    }
+
+    try {
+        $taskManager->updateTaskContent($taskId, $newContent);
+        echo "Task content updated successfully.";
+    } catch (Exception $e) {
+        echo $e->getMessage();
+    }
+    header("Location: index.php");
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['task_id']) && isset($_POST['status'])) {
+    // Updating the status of a task
     $taskId = filter_var($_POST['task_id'], FILTER_VALIDATE_INT);
     if ($taskId === false) {
         echo "Invalid task ID.";
         exit;
     }
 
-    $newStatus = $_POST['status'] === 'true' ? 'completed' : 'pending';
-    $stmt = $pdo->prepare("UPDATE tasks SET status = :status WHERE id = :id");
-    $stmt->execute(['status' => $newStatus, 'id' => $taskId]);
+    $taskManager->updateStatus($taskId, $_POST['status']);
     exit;
 }
 
-// Handle task deletion
 if (isset($_GET['delete'])) {
+    // Deleting a task
     $id = filter_var($_GET['delete'], FILTER_VALIDATE_INT);
     if ($id === false) {
         echo "Invalid task ID.";
         exit;
     }
 
-    // Delete task
-    $stmt = $pdo->prepare("DELETE FROM tasks WHERE id = :id");
-    $stmt->execute(['id' => $id]);
+    $taskManager->deleteTask($id);
     header("Location: index.php");
     exit;
 }
 
-// Handle filtering with pagination
 $filter = $_GET['filter'] ?? 'all';
-$limit = 10; // Limit the number of tasks shown per page
+$limit = 10;
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 $offset = ($page - 1) * $limit;
 
-$query = "SELECT * FROM tasks";
-if ($filter === 'pending') {
-    $query .= " WHERE status = 'pending'";
-} elseif ($filter === 'completed') {
-    $query .= " WHERE status = 'completed'";
-}
-$query .= " ORDER BY id DESC LIMIT :limit OFFSET :offset";
-
-$stmt = $pdo->prepare($query);
-$stmt->bindParam(':limit', $limit, PDO::PARAM_INT);
-$stmt->bindParam(':offset', $offset, PDO::PARAM_INT);
-$stmt->execute();
-$tasks = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// Get the total count of tasks for pagination
-$totalTasksQuery = "SELECT COUNT(*) FROM tasks";
-$totalStmt = $pdo->prepare($totalTasksQuery);
-$totalStmt->execute();
-$totalTasks = $totalStmt->fetchColumn();
+$tasks = $taskManager->getTasks($filter, $limit, $offset);
+$totalTasks = $taskManager->countTasks();
 $totalPages = ceil($totalTasks / $limit);
 ?>
 
@@ -86,20 +84,20 @@ $totalPages = ceil($totalTasks / $limit);
     <div class="container">
         <h1>To-Do List</h1>
 
-        <!-- Add Task Form -->
+        <!-- Form to add a new task -->
         <form method="POST" action="index.php">
             <input type="text" name="task" placeholder="Enter new task" required>
             <button type="submit">Add Task</button>
         </form>
 
-        <!-- Filter Options -->
+        <!-- Filter links -->
         <div class="filters">
             <a href="index.php?filter=all" class="<?php echo $filter === 'all' ? 'active' : ''; ?>">All</a>
             <a href="index.php?filter=pending" class="<?php echo $filter === 'pending' ? 'active' : ''; ?>">Pending</a>
             <a href="index.php?filter=completed" class="<?php echo $filter === 'completed' ? 'active' : ''; ?>">Completed</a>
         </div>
 
-        <!-- Display Tasks -->
+        <!-- List of tasks -->
         <ul class="task-list">
             <?php foreach ($tasks as $task): ?>
                 <li class="<?php echo htmlspecialchars($task['status']); ?>">
@@ -110,13 +108,24 @@ $totalPages = ceil($totalTasks / $limit);
                     <span class="task-text <?php echo htmlspecialchars($task['status']); ?>">
                         <?php echo htmlspecialchars($task['task']); ?>
                     </span>
-                    <!-- Delete button -->
+
+                    <!-- Link to delete the task -->
                     <a href="index.php?delete=<?php echo htmlspecialchars($task['id']); ?>" class="delete-btn">Delete</a>
+
+                    <!-- Show Edit Button -->
+                    <button type="button" class="show-update-btn">Edit</button>
+
+                    <!-- Update Task Form -->
+                    <form method="POST" action="index.php" class="update-task-form" style="display: none;">
+                        <input type="hidden" name="update_task_id" value="<?php echo htmlspecialchars($task['id']); ?>">
+                        <input type="text" name="new_content" value="<?php echo htmlspecialchars($task['task']); ?>" class="update-input">
+                        <button type="submit" class="update-btn">Update</button>
+                    </form>
                 </li>
             <?php endforeach; ?>
         </ul>
 
-        <!-- Pagination -->
+        <!-- Pagination links -->
         <div class="pagination">
             <?php for ($i = 1; $i <= $totalPages; $i++): ?>
                 <a href="index.php?filter=<?php echo $filter; ?>&page=<?php echo $i; ?>" class="<?php echo $i === $page ? 'active' : ''; ?>"><?php echo $i; ?></a>
@@ -125,24 +134,17 @@ $totalPages = ceil($totalTasks / $limit);
     </div>
 
     <script>
-        // JavaScript to handle checkbox status update
-        document.querySelectorAll('.status-checkbox').forEach(checkbox => {
-            checkbox.addEventListener('change', function() {
-                const taskId = this.getAttribute('data-task-id');
-                const status = this.checked ? 'true' : 'false'; // true for completed, false for pending
+        // JavaScript to handle the toggle of edit buttons and form submission
+        document.addEventListener('DOMContentLoaded', function () {
+            // Add event listener to all edit buttons
+            document.querySelectorAll('.show-update-btn').forEach(button => {
+                button.addEventListener('click', function () {
+                    const listItem = button.closest('li');
+                    const updateForm = listItem.querySelector('.update-task-form');
 
-                // Send AJAX request to update task status
-                fetch('index.php', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    },
-                    body: `task_id=${taskId}&status=${status}`
-                }).then(response => response.text())
-                  .then(data => {
-                      console.log('Status updated:', data);
-                  })
-                  .catch(error => console.error('Error updating status:', error));
+                    // Toggle visibility of the update form
+                    updateForm.style.display = updateForm.style.display === 'block' ? 'none' : 'block';
+                });
             });
         });
     </script>
